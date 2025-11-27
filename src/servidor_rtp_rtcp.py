@@ -9,20 +9,27 @@ from utils.rtcp_packet import RTCPSenderReport
 RTP_PORT = 5005
 RTCP_PORT = 5006
 
+# Archivo donde se registrarán las métricas RTCP del servidor
+RTCP_LOG_FILE = "rtcp_server_log.csv"
+
 # Variables compartidas (métricas)
 lock = threading.Lock()
 ult_seq = 0
+paquetes_recibidos = 0
 paquetes_perdidos = 0
 jitter = 0.0
 ultimo_ts = None
 ultimo_tiempo_llegada = None  # Para calcular jitter correctamente
+
+# Historial de métricas recibidas por RTCP (en memoria)
+rtcp_metrics_history = []
 
 
 # ==============================================================
 #   HILO: RECEPCIÓN DE RTP
 # ==============================================================
 def manejar_rtp():
-    global ult_seq, paquetes_perdidos, jitter, ultimo_ts, ultimo_tiempo_llegada
+    global ult_seq, paquetes_recibidos, paquetes_perdidos, jitter, ultimo_ts, ultimo_tiempo_llegada
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -45,6 +52,7 @@ def manejar_rtp():
         payload = rtp_packet.payload.decode(errors='replace')
 
         with lock:
+            paquetes_recibidos += 1
             # Detección de pérdidas
             if ult_seq > 0:  # Ignorar el primer paquete
                 esperado = ult_seq + 1
@@ -83,8 +91,20 @@ def manejar_rtcp():
     sock.bind(("", RTCP_PORT))
     print(f"[SERVIDOR] Escuchando RTCP en puerto {RTCP_PORT}")
 
+    # Inicializar archivo de log (si no existe, escribir cabecera)
+    try:
+        with open(RTCP_LOG_FILE, "x", encoding="utf-8") as f:
+            f.write("timestamp_local,ssrc,rtp_timestamp,paquetes_enviados,"
+                    "paquetes_recibidos,paquetes_perdidos,loss_rate,jitter_s,delay_ms\n")
+    except FileExistsError:
+        # Ya existe, no hacer nada
+        pass
+
+    NTP_DELTA = 2208988800  # Diferencia entre época NTP y Unix
+
     while True:
         data, addr = sock.recvfrom(4096)
+        now = time.time()
 
         # Decodificar RTCP Sender Report usando struct
         sr = RTCPSenderReport.decode(data)
@@ -93,10 +113,44 @@ def manejar_rtcp():
             print("[RTCP] Paquete RTCP malformado o tipo incorrecto")
             continue
 
-        print(f"[RTCP] Recibido desde {addr}: {sr}")
+        # Calcular retardo (one-way delay aproximado) a partir del timestamp NTP
+        ntp_sec, ntp_frac = sr.ntp_timestamp
+        ntp_time = ntp_sec + ntp_frac / (2**32)
+        unix_time_sender = ntp_time - NTP_DELTA
+        delay_ms = (now - unix_time_sender) * 1000.0
 
         with lock:
-            print(f"[METRICAS] ult_seq={ult_seq} | perdidos={paquetes_perdidos} | jitter={jitter:.6f}s")
+            enviados = sr.packet_count
+            recibidos_local = paquetes_recibidos
+            perdidos_estimados = max(0, enviados - recibidos_local)
+            loss_rate = (perdidos_estimados / enviados) if enviados > 0 else 0.0
+            jitter_val = jitter
+
+            # Guardar en estructura en memoria
+            metrics = {
+                "timestamp_local": now,
+                "ssrc": sr.ssrc,
+                "rtp_timestamp": sr.rtp_timestamp,
+                "paquetes_enviados": enviados,
+                "paquetes_recibidos": recibidos_local,
+                "paquetes_perdidos": perdidos_estimados,
+                "loss_rate": loss_rate,
+                "jitter_s": jitter_val,
+                "delay_ms": delay_ms,
+            }
+            rtcp_metrics_history.append(metrics)
+
+        # Escribir en archivo de log
+        with open(RTCP_LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(f"{now:.3f},{sr.ssrc:08x},{sr.rtp_timestamp},"
+                    f"{enviados},{recibidos_local},{perdidos_estimados},"
+                    f"{loss_rate:.6f},{jitter_val:.6f},{delay_ms:.3f}\n")
+
+        # Mostrar métricas por consola
+        print(f"[RTCP] Reporte desde {addr}: {sr}")
+        print(f"[RTCP-METRICAS] delay={delay_ms:.2f} ms | jitter={jitter_val:.6f} s | "
+              f"enviados={enviados} | recibidos={recibidos_local} | "
+              f"perdidos={perdidos_estimados} ({loss_rate*100:.2f}%)")
 
 
 # Lanzar hilos
