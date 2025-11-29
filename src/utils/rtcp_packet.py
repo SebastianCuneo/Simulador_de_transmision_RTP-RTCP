@@ -82,7 +82,7 @@ class RTCPSenderReport(RTCPPacket):
         # Empaquetar
         ntp_sec, ntp_frac = self.ntp_timestamp
         
-        packet = struct.pack('!BBHIIIIIII',
+        packet = struct.pack('!BBHIIIIII',
                             byte0,           # V, P, RC
                             self.SR,         # PT
                             length,          # length
@@ -101,7 +101,7 @@ class RTCPSenderReport(RTCPPacket):
         if len(data) < 28:  # Tamaño mínimo de SR
             return None
             
-        fields = struct.unpack('!BBHIIIIIII', data[:28])
+        fields = struct.unpack('!BBHIIIIII', data[:28])
         
         byte0 = fields[0]
         version = (byte0 >> 6) & 0x03
